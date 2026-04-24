@@ -1,56 +1,85 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { supabase } from '../../lib/supabase';
+import { useRouter } from 'next/navigation';
+
+interface Profile {
+  full_name: string;
+  avatar_url: string;
+}
+
+interface SessionUser {
+  id: string;
+}
+
+interface Post {
+  id: string;
+  caption: string;
+  location: string;
+  image_urls: string | string[] | null;
+  reactions: Record<string, number>;
+  shares: number;
+  created_at: string;
+  profiles: Profile | null;
+}
+
+interface Comment {
+  id: string;
+  post_id: string;
+  text: string;
+  user_id: string;
+  created_at: string;
+  profiles: Profile | null;
+}
 
 export default function Feed() {
-  const [posts, setPosts] = useState<any[]>([]);
-  const [comments, setComments] = useState<{ [key: string]: any[] }>({});
+  const [posts, setPosts] = useState<Post[]>([]);
+  const [comments, setComments] = useState<{ [key: string]: Comment[] }>({});
   const [commentText, setCommentText] = useState<{ [key: string]: string }>({});
+  const [showReactions, setShowReactions] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
-  const [postingComment, setPostingComment] = useState<string | null>(null);
+  const [user, setUser] = useState<SessionUser | null>(null);
+  const [tapData, setTapData] = useState<Record<string, number>>({});
+  const touchTimers = useRef<Record<string, ReturnType<typeof setTimeout>>>({});
+
+  const router = useRouter();
 
   useEffect(() => {
-    fetchAllData();
+    checkUser();
   }, []);
 
-  const fetchAllData = async () => {
-    setLoading(true);
+  const checkUser = async () => {
+    const { data: { session } } = await supabase.auth.getSession();
 
-    // ✅ Fetch posts with error handling
-    const { data: postsData, error: postsError } = await supabase
-      .from('posts')
-      .select(`
-        *,
-        profiles (full_name, avatar_url)
-      `)
-      .order('created_at', { ascending: false });
-
-    if (postsError) {
-      console.error("POST FETCH ERROR:", postsError.message);
-      setPosts([]);
-      setLoading(false);
+    if (!session) {
+      router.push('/auth/login');
       return;
     }
 
-    setPosts(postsData || []);
+    setUser(session.user as SessionUser);
+    fetchAllData();
+  };
 
-    // ✅ Fetch comments
-    if (postsData && postsData.length > 0) {
-      const postIds = postsData.map((p: any) => p.id);
+  const fetchAllData = async () => {
+    const { data: postsData } = await supabase
+      .from('posts')
+      .select(`*, profiles (full_name, avatar_url)`)
+      .order('created_at', { ascending: false });
 
-      const { data: commentsData, error: commentsError } = await supabase
+    setPosts((postsData as Post[]) || []);
+
+    if (postsData?.length) {
+      const postIds = postsData.map((p: Post) => p.id);
+
+      const { data: commentsData } = await supabase
         .from('comments')
-        .select('*')
+        .select(`*, profiles (full_name, avatar_url)`)
         .in('post_id', postIds)
         .order('created_at', { ascending: true });
 
-      if (commentsError) {
-        console.error("COMMENTS ERROR:", commentsError.message);
-      }
-
-      const map: { [key: string]: any[] } = {};
-      (commentsData || []).forEach((c: any) => {
+      const map: { [key: string]: Comment[] } = {};
+      (commentsData as Comment[] || []).forEach((c) => {
         if (!map[c.post_id]) map[c.post_id] = [];
         map[c.post_id].push(c);
       });
@@ -61,181 +90,246 @@ export default function Feed() {
     setLoading(false);
   };
 
+  // 👍 REACTION (Optimized)
+  const addReaction = async (postId: string, reaction: string) => {
+    if (!user) return;
+
+    const post = posts.find((p) => p.id === postId);
+    const current = post?.reactions || {};
+
+    const updated = {
+      ...current,
+      [reaction]: (current[reaction] || 0) + 1,
+    };
+
+    await supabase
+      .from('posts')
+      .update({ reactions: updated })
+      .eq('id', postId);
+
+    setPosts(prev =>
+      prev.map(p =>
+        p.id === postId ? { ...p, reactions: updated } : p
+      )
+    );
+
+    setShowReactions(null);
+  };
+
+  // 💬 COMMENT (Optimized)
   const addComment = async (postId: string) => {
+    if (!user) return;
+
     const text = commentText[postId]?.trim();
     if (!text) return;
 
-    setPostingComment(postId);
+    await supabase.from('comments').insert({
+      post_id: postId,
+      text,
+      user_id: user.id,
+    });
 
-    const { data: { session } } = await supabase.auth.getSession();
-    if (!session) {
-      alert("Please log in");
-      setPostingComment(null);
-      return;
-    }
-
-    const { error } = await supabase
-      .from('comments')
-      .insert({
-        post_id: postId,
-        text,
-        user_id: session.user.id
-      });
-
-    if (error) {
-      console.error("COMMENT ERROR:", error.message);
-      alert("Failed to post comment");
-      setPostingComment(null);
-      return;
-    }
-
-    // ✅ Optimistic UI update (no full refetch needed)
     setComments(prev => ({
       ...prev,
       [postId]: [
         ...(prev[postId] || []),
-        { text }
+        {
+          id: Math.random().toString(),
+          post_id: postId,
+          text,
+          user_id: user.id,
+          created_at: new Date().toISOString(),
+          profiles: { full_name: 'You', avatar_url: '' }
+        }
       ]
     }));
 
     setCommentText(prev => ({ ...prev, [postId]: '' }));
-    setPostingComment(null);
   };
 
-  // ✅ Improved image handler
-  const getImageUrl = (imageUrls: any): string | null => {
-    if (!imageUrls) return null;
+  // 🔗 SHARE
+  const sharePost = async (post: Post) => {
+    const url = window.location.href;
 
+    try {
+      if (navigator.share) {
+        await navigator.share({
+          title: post.caption,
+          text: post.location,
+          url,
+        });
+      } else {
+        await navigator.clipboard.writeText(url);
+        alert('Link copied!');
+      }
+
+      await supabase
+        .from('posts')
+        .update({ shares: (post.shares || 0) + 1 })
+        .eq('id', post.id);
+
+      setPosts(prev =>
+        prev.map(p =>
+          p.id === post.id
+            ? { ...p, shares: (p.shares || 0) + 1 }
+            : p
+        )
+      );
+
+    } catch (err) {
+      console.error(err);
+    }
+  };
+
+  const getImageUrl = (imageUrls: string | string[] | null): string | null => {
+    if (!imageUrls) return null;
     if (Array.isArray(imageUrls)) return imageUrls[0];
 
-    if (typeof imageUrls === 'string') {
-      try {
-        const parsed = JSON.parse(imageUrls);
-        return Array.isArray(parsed) ? parsed[0] : imageUrls;
-      } catch {
-        return imageUrls;
-      }
+    try {
+      const parsed = JSON.parse(imageUrls);
+      return Array.isArray(parsed) ? parsed[0] : parsed;
+    } catch {
+      return imageUrls;
     }
+  };
 
-    return null;
+  const getTotalReactions = (reactions?: Record<string, number>) => {
+    return Object.values(reactions || {}).reduce((a, b) => a + b, 0);
   };
 
   if (loading) {
-    return <div className="text-center py-20 text-2xl">Loading...</div>;
+    return <div className="text-center py-20 text-xl">Loading...</div>;
   }
 
   return (
-    <div className="min-h-screen bg-gray-950 text-white pt-8 pb-20">
-      <div className="max-w-4xl mx-auto px-6">
-        <h2 className="text-5xl font-bold mb-12 text-center">
-          Recent Adventures
-        </h2>
+    <div className="space-y-10 pb-24 max-w-5xl mx-auto px-2 sm:px-4">
 
-        {/* ✅ Empty state */}
-        {posts.length === 0 && (
-          <p className="text-center text-white/50">No posts yet.</p>
-        )}
+      <h2 className="text-3xl sm:text-5xl font-bold text-center">
+        Recent Adventures
+      </h2>
 
-        <div className="space-y-12">
-          {posts.map((post: any) => {
-            const imageUrl = getImageUrl(post.image_urls);
-            const postComments = comments[post.id] || [];
+      {posts.length === 0 && (
+        <p className="text-center text-white/60 py-20">
+          No adventures yet. Be the first to share!
+        </p>
+      )}
 
-            return (
-              <div key={post.id} className="bg-zinc-900 rounded-3xl overflow-hidden">
+      {posts.map((post) => {
+        const imageUrl = getImageUrl(post.image_urls);
+        const reactions = post.reactions || {};
+        const postComments = comments[post.id] || [];
+        const userProfile = post.profiles;
 
-                {/* HEADER */}
-                <div className="p-6 flex items-center justify-between border-b border-white/10">
-                  <div className="flex items-center gap-4">
-                    <img
-                      src={post.profiles?.avatar_url || 'https://via.placeholder.com/150'}
-                      alt="User"
-                      className="w-12 h-12 rounded-full object-cover"
-                    />
-                    <div>
-                      <p className="font-semibold">
-                        {post.profiles?.full_name || 'Unknown User'}
+        return (
+          <div
+            key={post.id}
+            className="bg-zinc-900/95 border border-white/10 rounded-[2rem] shadow-xl overflow-hidden transition hover:-translate-y-1"
+          >
+
+            {/* HEADER */}
+            <div className="flex items-center gap-3 p-4 border-b border-white/10">
+              <img
+                src={userProfile?.avatar_url || 'https://via.placeholder.com/150'}
+                className="w-10 h-10 rounded-full object-cover"
+              />
+              <div>
+                <p className="font-semibold text-sm text-white/95 tracking-wide">
+                  {userProfile?.full_name || 'User'}
+                </p>
+                <p className="text-xs text-white/60">📍 {post.location}</p>
+              </div>
+            </div>
+
+            {/* IMAGE */}
+            {imageUrl && (
+              <img
+                src={imageUrl}
+                className="w-full h-64 sm:h-96 object-cover cursor-pointer"
+                onClick={() =>
+                  setShowReactions(showReactions === post.id ? null : post.id)
+                }
+              />
+            )}
+
+            <div className="p-5 sm:p-8">
+              <p className="text-lg sm:text-2xl text-white/95 leading-relaxed">
+                {post.caption}
+              </p>
+
+              {/* REACTIONS */}
+              <div className="flex items-center gap-4 mt-4 relative">
+                <button
+                  onClick={() =>
+                    setShowReactions(showReactions === post.id ? null : post.id)
+                  }
+                  className="text-2xl"
+                >
+                  👍
+                </button>
+
+                <span className="text-sm text-white/70">
+                  {getTotalReactions(reactions)} reactions
+                </span>
+
+                {showReactions === post.id && (
+                  <div className="absolute top-12 left-2 sm:left-0 bg-zinc-800 p-3 rounded-xl flex gap-3">
+                    <button onClick={() => addReaction(post.id, '👍')}>👍</button>
+                    <button onClick={() => addReaction(post.id, '❤️')}>❤️</button>
+                    <button onClick={() => addReaction(post.id, '😲')}>😲</button>
+                  </div>
+                )}
+              </div>
+
+              {/* SHARE */}
+              <div className="flex items-center gap-4 mt-4 text-sm">
+                <button onClick={() => sharePost(post)}>🔗 Share</button>
+                <span>{post.shares || 0} shares</span>
+              </div>
+
+              {/* COMMENTS */}
+              <div className="mt-6">
+                <p className="text-white/70 mb-2">
+                  Comments ({postComments.length})
+                </p>
+
+                <div className="space-y-2 max-h-40 overflow-y-auto">
+                  {postComments.map((c, i) => (
+                    <div key={i} className="bg-zinc-800 p-3 rounded-xl text-sm">
+                      <p className="font-semibold text-emerald-400">
+                        {c.profiles?.full_name || 'User'}
                       </p>
-                      <p className="text-sm text-white/60">
-                        {post.location}
+                      <p className="text-white/90 leading-relaxed">
+                        {c.text}
                       </p>
                     </div>
-                  </div>
+                  ))}
                 </div>
 
-                {/* IMAGE */}
-                {imageUrl && (
-                  <img
-                    src={imageUrl}
-                    alt="Travel"
-                    className="w-full h-96 object-cover"
-                    onError={(e) => {
-                      console.error("IMAGE FAILED:", imageUrl);
-                      (e.target as HTMLImageElement).style.display = 'none';
-                    }}
+                <div className="flex gap-2 mt-3">
+                  <input
+                    value={commentText[post.id] || ''}
+                    onChange={(e) =>
+                      setCommentText(prev => ({
+                        ...prev,
+                        [post.id]: e.target.value,
+                      }))
+                    }
+                    placeholder="Write a comment..."
+                    className="flex-1 bg-zinc-800 px-3 py-2 rounded-xl text-white"
                   />
-                )}
-
-                {/* CONTENT */}
-                <div className="p-8">
-                  <p className="text-2xl font-medium">{post.caption}</p>
-                  <p className="text-yellow-400 text-3xl mt-4">
-                    ⭐ {post.rating}/5
-                  </p>
-
-                  {/* COMMENTS */}
-                  <div className="mt-8">
-                    <p className="text-white/70 mb-4">
-                      Comments ({postComments.length})
-                    </p>
-
-                    <div className="space-y-4 mb-6 max-h-80 overflow-y-auto">
-                      {postComments.length === 0 ? (
-                        <p className="text-white/50 text-center py-8">
-                          No comments yet.
-                        </p>
-                      ) : (
-                        postComments.map((c: any, i: number) => (
-                          <div key={i} className="bg-zinc-800 rounded-2xl p-5">
-                            <p className="text-white">{c.text}</p>
-                          </div>
-                        ))
-                      )}
-                    </div>
-
-                    {/* INPUT */}
-                    <div className="flex gap-3">
-                      <input
-                        value={commentText[post.id] || ''}
-                        onChange={(e) =>
-                          setCommentText(prev => ({
-                            ...prev,
-                            [post.id]: e.target.value
-                          }))
-                        }
-                        placeholder="Write a comment..."
-                        className="flex-1 bg-zinc-800 px-5 py-4 rounded-2xl"
-                        onKeyDown={(e) =>
-                          e.key === 'Enter' && addComment(post.id)
-                        }
-                      />
-
-                      <button
-                        onClick={() => addComment(post.id)}
-                        disabled={postingComment === post.id}
-                        className="bg-emerald-600 px-10 rounded-2xl disabled:opacity-50"
-                      >
-                        {postingComment === post.id ? 'Sending...' : 'Send'}
-                      </button>
-                    </div>
-                  </div>
-
+                  <button
+                    onClick={() => addComment(post.id)}
+                    className="bg-emerald-600 px-4 rounded-xl"
+                  >
+                    Send
+                  </button>
                 </div>
               </div>
-            );
-          })}
-        </div>
-      </div>
+
+            </div>
+          </div>
+        );
+      })}
     </div>
   );
 }
