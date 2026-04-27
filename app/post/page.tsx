@@ -5,7 +5,7 @@ import { supabase } from '../../lib/supabase';
 import { useRouter } from 'next/navigation';
 
 const popularPlaces = [
-  "Dinagat Islands", "Siargao", "Boracay", "El Nido", "Coron", "Palawan", 
+  "Dinagat Islands", "Siargao", "Boracay", "El Nido", "Coron", "Palawan",
   "Cebu", "Bohol", "Davao", "Manila", "Baguio", "Sagada", "Vigan", "Batanes", "Siquijor"
 ];
 
@@ -22,7 +22,6 @@ export default function CreatePost() {
   const [gettingLocation, setGettingLocation] = useState(false);
   const router = useRouter();
 
-  // Handle Repost
   useEffect(() => {
     const repostData = localStorage.getItem('repostData');
     if (repostData) {
@@ -67,6 +66,7 @@ export default function CreatePost() {
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+
     if (images.length === 0 && previewUrls.length === 0) {
       setError("Please upload at least one photo");
       return;
@@ -78,19 +78,18 @@ export default function CreatePost() {
     try {
       const imageUrls: string[] = [];
 
-      // Upload new images
       for (const image of images) {
         const fileName = `${Date.now()}-${image.name}`;
         const { error: uploadError } = await supabase.storage
           .from('post-images')
           .upload(fileName, image);
+
         if (uploadError) throw uploadError;
 
         const { data } = supabase.storage.from('post-images').getPublicUrl(fileName);
         imageUrls.push(data.publicUrl);
       }
 
-      // Use reposted images if no new upload
       if (imageUrls.length === 0 && previewUrls.length > 0) {
         imageUrls.push(...previewUrls);
       }
@@ -127,12 +126,39 @@ export default function CreatePost() {
         {error && <p className="text-red-500 text-center mb-6">{error}</p>}
 
         <form onSubmit={handleSubmit} className="space-y-8">
+
+          {/* 1. UPLOAD PHOTOS FIRST */}
+          <div>
+            <label className="block text-sm mb-3 text-white/70">Upload Photos</label>
+            <input
+              type="file"
+              multiple
+              accept="image/*"
+              onChange={handleImageChange}
+              className="block w-full text-sm text-white/70 file:mr-4 file:py-3 file:px-6 file:rounded-full file:border-0 file:text-sm file:font-medium file:bg-emerald-600 file:text-white"
+            />
+
+            {previewUrls.length > 0 && (
+              <div className="grid grid-cols-3 gap-3 mt-6">
+                {previewUrls.map((url, i) => (
+                  <img
+                    key={i}
+                    src={url}
+                    alt="preview"
+                    className="rounded-2xl aspect-square object-cover"
+                  />
+                ))}
+              </div>
+            )}
+          </div>
+
+          {/* 2. LOCATION */}
           <div>
             <label className="block text-sm mb-2 text-white/70">Where did you visit?</label>
             <div className="flex gap-3">
               <input
                 type="text"
-                placeholder="e.g. Dinagat Islands, Siargao..."
+                placeholder="e.g. Siargao, El Nido..."
                 value={location}
                 onChange={(e) => setLocation(e.target.value)}
                 className="flex-1 px-5 py-4 bg-zinc-900 border border-white/10 rounded-2xl"
@@ -148,43 +174,54 @@ export default function CreatePost() {
                 {gettingLocation ? 'Getting...' : '📍 My Location'}
               </button>
             </div>
+
             <datalist id="places">
-              {popularPlaces.map(place => <option key={place} value={place} />)}
+              {popularPlaces.map(place => (
+                <option key={place} value={place} />
+              ))}
             </datalist>
           </div>
 
+          {/* 3. RATING */}
           <div>
             <label className="block text-sm mb-3 text-white/70">Rate this place</label>
             <div className="flex gap-3 text-5xl justify-center">
-              {[1,2,3,4,5].map((num) => (
-                <button key={num} type="button" onClick={() => setRating(num)} className={rating >= num ? 'text-yellow-400' : 'text-gray-600'}>
+              {[1, 2, 3, 4, 5].map((num) => (
+                <button
+                  key={num}
+                  type="button"
+                  onClick={() => setRating(num)}
+                  className={rating >= num ? 'text-yellow-400' : 'text-gray-600'}
+                >
                   ★
                 </button>
               ))}
             </div>
           </div>
 
+          {/* 4. CAPTION LAST */}
           <div>
-            <label className="block text-sm mb-2 text-white/70">Tell us about your experience</label>
-            <textarea value={caption} onChange={(e) => setCaption(e.target.value)} rows={6} placeholder="What made this place special?" className="w-full px-5 py-4 bg-zinc-900 border border-white/10 rounded-3xl" required />
+            <label className="block text-sm mb-2 text-white/70">
+              Tell us about your experience
+            </label>
+            <textarea
+              value={caption}
+              onChange={(e) => setCaption(e.target.value)}
+              rows={6}
+              placeholder="What made this place special?"
+              className="w-full px-5 py-4 bg-zinc-900 border border-white/10 rounded-3xl"
+              required
+            />
           </div>
 
-          <div>
-            <label className="block text-sm mb-3 text-white/70">Upload Photos</label>
-            <input type="file" multiple accept="image/*" onChange={handleImageChange} className="block w-full text-sm text-white/70 file:mr-4 file:py-3 file:px-6 file:rounded-full file:border-0 file:text-sm file:font-medium file:bg-emerald-600 file:text-white" />
-
-            {previewUrls.length > 0 && (
-              <div className="grid grid-cols-3 gap-3 mt-6">
-                {previewUrls.map((url, i) => (
-                  <img key={i} src={url} alt="preview" className="rounded-2xl aspect-square object-cover" />
-                ))}
-              </div>
-            )}
-          </div>
-
-          <button type="submit" disabled={loading} className="w-full bg-emerald-600 hover:bg-emerald-700 py-5 rounded-2xl text-xl font-semibold disabled:opacity-50">
+          <button
+            type="submit"
+            disabled={loading}
+            className="w-full bg-emerald-600 hover:bg-emerald-700 py-5 rounded-2xl text-xl font-semibold disabled:opacity-50"
+          >
             {loading ? 'Posting...' : 'Share this Adventure'}
           </button>
+
         </form>
       </div>
     </div>
